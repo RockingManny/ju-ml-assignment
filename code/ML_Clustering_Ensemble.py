@@ -13,9 +13,12 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.datasets import fetch_openml
 import time
 from tqdm import tqdm
+import psutil
+K_MEANS = "kmeans"
+DB_SCAN = "dbscan"
 
 class ClusteringComparison:
-    def __init__(self, dataset_name, k_values=[], m=5, algorithm=None):
+    def __init__(self, dataset_name, k_values=[], m=5, algorithm=K_MEANS):
         self.dataset_name = dataset_name
         self.k_values = k_values
         self.m = m  # Number of different clustering models
@@ -93,22 +96,31 @@ class ClusteringComparison:
         for i in range(self.m):
             selected_features = np.random.choice(range(n_features), size=math.floor(n_features ** 0.5), replace=False)
             sub_data = self.scaled_data[:, selected_features]
-            
+
             if not self.algorithm or self.algorithm not in ["kmeans", "dbscan"]:
-                # randomly select between KMeans and DBSCAN
                 self.algorithm = random.choice(["kmeans", "dbscan"])
 
             if self.algorithm == "dbscan":
-                model = DBSCAN(eps=1.5, min_samples=5).fit(sub_data)
+                # Dynamically adjust DBSCAN parameters
+                eps = max(0.5, min(2.0, 2.5 - (k / 10)))  # Adjust range [0.5, 2.0]
+                min_samples = max(2, min(10, k // 3))  # Adjust range [2, 10]
+                
+                print(f"[INFO] Using DBSCAN with eps={eps}, min_samples={min_samples}")
+                model = DBSCAN(eps=eps, min_samples=min_samples).fit(sub_data)
             else:
                 model = KMeans(n_clusters=k, random_state=i).fit(sub_data)
-            
+
             self.visualize_clusters(model, k, additional=f"subcluster_{i}_{self.algorithm}")
 
+            # Assign cluster labels, handling DBSCAN noise (-1)
+            labels = model.labels_
+            labels[labels == -1] = k  # Assign noise to an extra cluster ID
+            
             for j in range(k):
-                cluster_assignments[:, i * k + j] = (model.labels_ == j).astype(int)
-        
+                cluster_assignments[:, i * k + j] = (labels == j).astype(int)
+
         return cluster_assignments
+
     
     def final_kmeans_clustering(self, transformed_data, k):
         print(f"[INFO] Applying final K-Means clustering on transformed data for K={k}...")
@@ -120,25 +132,61 @@ class ClusteringComparison:
         mse = mean_squared_error(true_labels, pred_labels)
         entropy_val = entropy(np.bincount(pred_labels))
         return {"Rand Index": rand_idx, "MSE": mse, "Entropy": entropy_val}
-    
+
+    def find_safe_cluster_values(self):
+        print("[INFO] Generating safe K values based on system memory...")
+
+        total_memory = psutil.virtual_memory().total / (1024 ** 3)  # Convert bytes to GB
+        available_memory = psutil.virtual_memory().available / (1024 ** 3)
+        
+        print(f"[INFO] Total System Memory: {total_memory:.2f} GB, Available: {available_memory:.2f} GB")
+
+        n_features = len(self.data.columns)
+        
+        # Dynamically adjust cluster bounds based on memory
+        memory_factor = max(0.1, available_memory / total_memory)  # Ensure it's at least 10%
+
+        lower_bound = max(2, math.floor(n_features * (1/7)))
+        upper_bound = max(lower_bound + 1, math.floor(n_features * (5/7)))
+
+        print(f"[INFO] Lower bound: {lower_bound}, Upper bound: {upper_bound}")
+
+        # Calculate the maximum allowable k based on available memory
+        # Assuming each float64 element takes 8 bytes
+        element_size = 8  # bytes
+        max_elements = available_memory * (1024 ** 3) / element_size
+        max_k = max_elements / (self.scaled_data.shape[0] * self.m)
+
+        # Adjust upper_bound if necessary
+        if upper_bound > max_k:
+            upper_bound = int(max_k)
+            print(f"[INFO] Adjusted Upper bound: {upper_bound} due to memory constraints")
+
+        # Ensure lower_bound is less than upper_bound
+        if lower_bound >= upper_bound:
+            lower_bound = max(2, upper_bound - 1)
+            print(f"[INFO] Adjusted Lower bound: {lower_bound} to ensure it's less than Upper bound")
+        
+        # Number of K values to generate, adjusted to memory
+        n = max(10, math.ceil(n_features * memory_factor))  # Ensure at least 10 values
+
+        self.k_values = [random.randint(lower_bound, upper_bound) for _ in range(n)]
+
+        print(f"[INFO] Lower Bound: {lower_bound}, Upper Bound: {upper_bound}, K Values Count: {n}")
+        print(f"[INFO] Generated K values: {self.k_values[:10]} ... (showing first 10)")
+
     def run_experiment(self):
         results = []
         
         # Generate random lower and upper bounds
         if not self.k_values:
-            print("Generating random K values...")
-            lower_bound = random.randint(math.floor(len(self.data.columns)*(2/7)), len(self.data.columns) // 2)
-            print(f"Lower bound: {lower_bound}")
-            upper_bound = random.randint(lower_bound, math.floor(len(self.data.columns)*(5/7)))
-            print(f"Upper bound: {upper_bound}")
+            self.find_safe_cluster_values()
+        
+        # sort the k_values
+        self.k_values.sort()
 
-            n = random.randint(math.ceil(len(self.data.columns) // 2), len(self.data.columns))
-            print(f"Number of K values: {n}")
-            # Number of elements in the list
+        self.k_values = list(set(self.k_values))
 
-            # Generate the random list within the bounds
-            self.k_values = [random.randint(lower_bound, upper_bound) for i in range(n)]
-            print(f"Lower bound: {lower_bound}, Upper bound: {upper_bound}")
         print(self.k_values)
 
 
@@ -146,7 +194,7 @@ class ClusteringComparison:
         start_time = time.time()
         
         with tqdm(total=total_k, desc="Clustering Progress", unit="K") as pbar:
-            for k in self.k_values:
+            for i,k in enumerate(self.k_values):
                 iter_start = time.time()
 
                 print(f"\n[INFO] Running clustering experiment for K={k}...")
@@ -174,7 +222,10 @@ class ClusteringComparison:
                     "Traditional Entropy": eval_traditional["Entropy"]
                 })
 
-                self.visualize_clusters(traditional_kmeans_model, k, additional="traditional_kmeans")
+                self.visualize_clusters(traditional_kmeans_model, k, additional=f"traditional_kmeans_k{i+1}")
+                iter_end = time.time()
+                print(f"[INFO] Iteration {i+1}/{total_k} completed in {iter_end - iter_start:.2f}s")
+                
 
                 elapsed_time = time.time() - start_time
                 avg_time_per_iter = elapsed_time / (pbar.n + 1)
@@ -186,6 +237,11 @@ class ClusteringComparison:
                 
                 
         df_results = pd.DataFrame(results)
+
+        # sort results and add ranks to results
+        df_results = df_results.sort_values(by="K", ascending=True)
+        # df_results["Ensemble Rank"] = np.arange(1, len(df_results) + 1)
+
         print("\n[INFO] Clustering Experiment Completed!")
         print(df_results.to_string(index=False))
         self.visualize_results(df_results)
@@ -210,21 +266,38 @@ class ClusteringComparison:
     
     def visualize_results(self, results_df):
         metrics = ["Rand Index", "MSE", "Entropy"]
+        bar_width = 0.15  # Maintain a small gap between bars
+        compression_factor = 0.5  # Reduce spacing between K values
+        
+        x = np.arange(len(results_df["K"])) * compression_factor  # Bring bars closer
+
         for metric in metrics:
-            plt.figure(figsize=(10, 5))
-            sns.lineplot(x=results_df["K"], y=results_df[f"Ensemble {metric}"], marker='o', label="Ensemble")
-            sns.lineplot(x=results_df["K"], y=results_df[f"Traditional {metric}"], marker='s', label="Traditional")
+            plt.figure(figsize=(8, 4))  # Compact figure size
+            
+            # Convert K values to strings for categorical x-axis
+            x_labels = results_df["K"].astype(str)
+
+            # Plot bars with a small separation
+            plt.bar(x - (bar_width * 0.25), results_df[f"Traditional {metric}"], bar_width, label="Traditional", color="red")
+            plt.bar(x + (bar_width * 0.25), results_df[f"Ensemble {metric}"], bar_width, label="Ensemble", color="black")
+
             plt.xlabel("K")
             plt.ylabel(metric)
-            plt.title(f"Comparison of {metric}")
+            plt.title(f"Comparison of {metric} (Compact Bar Chart)")
+            plt.xticks(x, x_labels)  # Adjust x-axis labels with reduced distance
             plt.legend()
-            # plt.show()
-            # target_path = os.path.join("visualizations", f"{metric}_comparison.png")
+
+            # Reduce whitespace around bars
+            plt.tight_layout()
+
+            # Save the plot
             self.save_plot(plt, f"{metric}_comparison.png")
             plt.close()
 
+
+
 # Example usage
-# # mnist_experiment = ClusteringComparison("mnist", k_values=[10, 11, 12, 13,14,15])
+# mnist_experiment = ClusteringComparison("mnist", k_values=[10, 11, 12, 13,14,15])
 # mnist_experiment = ClusteringComparison("mnist")
 # mnist_results = mnist_experiment.run_experiment()
 
