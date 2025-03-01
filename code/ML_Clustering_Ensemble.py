@@ -48,7 +48,7 @@ class ClusteringComparison:
 
             self.m = random.randint(math.ceil(len(mnist.data.columns) // 2), len(mnist.data.columns))
             print(f"Number of features: {len(mnist.data.columns)}")
-            print(f"Number of features to select: {self.m}")
+            print(f"Number of subcluster models: {self.m}")
 
             return mnist.data, mnist.target.astype(int)  # Ensure labels are integer
         elif self.dataset_name == "diabetes":
@@ -297,9 +297,9 @@ class ClusteringComparison:
 
 
 # Example usage
-# mnist_experiment = ClusteringComparison("mnist", k_values=[10, 11, 12, 13,14,15])
-# mnist_experiment = ClusteringComparison("mnist")
-# mnist_results = mnist_experiment.run_experiment()
+mnist_experiment = ClusteringComparison("mnist", k_values=[10, 11, 12, 13,14,15])
+mnist_experiment = ClusteringComparison("mnist")
+mnist_results = mnist_experiment.run_experiment()
 
 # diabetes_experiment = ClusteringComparison("diabetes", k_values=[2, 3, 4, 5])
 diabetes_experiment = ClusteringComparison("diabetes")
